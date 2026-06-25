@@ -4,4 +4,4 @@ venv/
 
 .vscode
 
-.pt
+*.pt
