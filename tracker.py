@@ -1,8 +1,13 @@
 import cv2
+import torch
 from ultralytics import YOLO
 
+# Use CUDA only if an NVIDIA GPU is available, otherwise fall back to CPU
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
+
 model = YOLO('yolov8s.pt')
-model.to('cuda')
+model.to(device)
 
 camera = cv2.VideoCapture(1)
 
