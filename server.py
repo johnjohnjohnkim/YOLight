@@ -1,6 +1,14 @@
-import socket
-import fastapi
+from socket import *
+import json
+
+PORT = 4002
+
+serverSocket = socket(AF_INET, SOCK_DGRAM)
+serverSocket.bind(('', PORT))
 
 
-UDP_IP = "239.255.255.250"
-PORT = "4001"
+print("Server is ready to receive.")
+
+while True:
+    message, clientAddr = serverSocket.recvfrom(2048)
+    modMessage = message.decode.upper()
