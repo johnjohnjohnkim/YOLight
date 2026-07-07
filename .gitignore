@@ -6,10 +6,8 @@ venv/
 
 *.pt
 
-test.py
-
 .claude
 
-/tests
+tests/
 
 *.pyc
