@@ -5,3 +5,10 @@ venv/
 .vscode
 
 *.pt
+
+test.py
+
+.claude
+
+/tests
+
