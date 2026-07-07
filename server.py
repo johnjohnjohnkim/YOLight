@@ -1,33 +1,55 @@
 from socket import *
 import json
 
-UDP_IP = "239.255.255.250"
-SEND_PORT = 4001
-LISTEN_PORT = 4002
-CONTROL_PORT = 4003
+import control
 
-sendSocket = socket(AF_INET, SOCK_DGRAM)
-listenSocket = socket(AF_INET, SOCK_DGRAM)
-listenSocket.bind(("", LISTEN_PORT))
-listenSocket.settimeout(240)
+UDP_IP = "239.255.255.250" # Govee multicast group address
+SEND_PORT = 4001    # Devices listen here for commands
+LISTEN_PORT = 4002  # Devices reply here
 
-scan_msg = json.dumps({
-    "msg": {
-        "cmd": "scan",
-        "data": {"account_topic": "reserve"}
-    }
-}).encode()
+devices = [] # Populated by discover_devices()
 
-sendSocket.sendto(scan_msg, (UDP_IP, SEND_PORT))
 
-devices = []
+def discover_devices():
+    """Broadcast a scan request and collect every Govee device that replies."""
+    sendSocket = socket(AF_INET, SOCK_DGRAM)
+    listenSocket = socket(AF_INET, SOCK_DGRAM)
+    listenSocket.bind(("", LISTEN_PORT))
+    listenSocket.settimeout(240) # Stop scanning after 4 minutes of silence
 
-while True:
-    try:
-        data, addr = listenSocket.recvfrom(1024)
-        response = json.loads(data.decode())
-        print(f"Got reply from {addr}: {response}")
-        devices.append(response["msg"]["data"])
-    except timeout:
-        print(f"Done scanning. Found {len(devices)} device(s).")
-        break
+    scan_msg = json.dumps({
+        "msg": {
+            "cmd": "scan",
+            "data": {"account_topic": "reserve"}
+        }
+    }).encode()
+
+    sendSocket.sendto(scan_msg, (UDP_IP, SEND_PORT))
+
+    devices.clear()
+    while True:
+        try:
+            data, addr = listenSocket.recvfrom(1024)
+            response = json.loads(data.decode())
+            print(f"Got reply from {addr}: {response}")
+            devices.append(response["msg"]["data"])
+        except timeout: # No more replies coming in
+            print(f"Done scanning. Found {len(devices)} device(s).")
+            break
+
+    sendSocket.close()
+    listenSocket.close()
+    return devices
+
+
+def turn_lights_on():
+    for device in devices:
+        control.send_turn_command(device["ip"], True)
+
+
+def turn_lights_off():
+    for device in devices:
+        control.send_turn_command(device["ip"], False)
+
+if __name__ == "__main__":
+    discover_devices()
