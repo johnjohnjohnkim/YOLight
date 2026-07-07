@@ -12,6 +12,8 @@ devices = [] # Populated by discover_devices()
 
 def discover_devices():
     """Broadcast a scan request and collect every Govee device that replies."""
+    print("Scanning for Govee devices...")
+
     sendSocket = socket(AF_INET, SOCK_DGRAM)
     listenSocket = socket(AF_INET, SOCK_DGRAM)
     listenSocket.bind(("", LISTEN_PORT))
@@ -31,10 +33,11 @@ def discover_devices():
         try:
             data, addr = listenSocket.recvfrom(1024)
             response = json.loads(data.decode())
-            print(f"Got reply from {addr}: {response}")
             devices.append(response["msg"]["data"])
         except timeout: # No more replies coming in
             print(f"Done scanning. Found {len(devices)} device(s).")
+            for device in devices:
+                print(f"  - {device.get('sku', 'unknown model')} at {device['ip']}")
             break
 
     sendSocket.close()
@@ -43,11 +46,13 @@ def discover_devices():
 
 
 def turn_lights_on():
+    print(f"Turning lights on ({len(devices)} device(s))")
     for device in devices:
         control.send_turn_command(device["ip"], True)
 
 
 def turn_lights_off():
+    print(f"Turning lights off ({len(devices)} device(s))")
     for device in devices:
         control.send_turn_command(device["ip"], False)
 
