@@ -53,14 +53,16 @@ while camera.isOpened():
         person_present = 0 in r.boxes.cls.tolist()
 
         # Occupancy state machine: turn on immediately on arrival, but debounce
-        # departure with a 10s grace period before turning off.
+        # departure with a 3s grace period before turning off. The grace period
+        # absorbs brief occlusions (person hidden behind a chair, closet, etc.)
+        # that would otherwise cause a false turn-off.
         if person_present and not was_present:
             server.turn_lights_on()
             safety_timestamp = None
         elif was_present and not person_present:
             safety_timestamp = time.monotonic()
         elif not was_present and not person_present and safety_timestamp is not None:
-            if time.monotonic() >= safety_timestamp+10:
+            if time.monotonic() >= safety_timestamp+3:
                 server.turn_lights_off()
                 safety_timestamp = None
 
