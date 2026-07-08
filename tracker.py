@@ -45,7 +45,7 @@ while camera.isOpened():
         break
 
     # Run inference
-    results = model.track(frame, stream=True)
+    results = model.track(frame, stream=False, verbose=False)
 
     # class 0 = person in the COCO classes YOLO is trained on
     for r in results:
