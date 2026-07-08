@@ -193,7 +193,21 @@ Eliminate occlusion false-offs entirely by tracking whether a person actually
 This is the killer feature: it turns "lights that follow the camera" into
 "lights that follow the room."
 
-### V3 — Gesture & pose control
+### V3 — Depth sensing for low-light / darkness
+
+Fix the biggest functional gap: a plain RGB camera is **blind in the dark**, so
+the one moment you most want automatic lighting — walking into a pitch-black
+room — is exactly when detection fails and you're forced to flip the switch by
+hand. The project uses an **Intel RealSense D435**, whose active-IR depth stream
+sees in **total darkness** without any visible light.
+
+- Detect people on the **depth / IR stream** when the RGB frame is too dark, then
+  hand back to normal RGB + YOLO once the lights are on.
+- Uses `pyrealsense2` to pull aligned depth + color frames from the D435.
+- Another **sensor-fusion** robustness win, alongside V2 (occlusion) and V4
+  (false gestures): each targets a distinct failure mode of naive vision.
+
+### V4 — Gesture & pose control
 
 Swap in **YOLOv8-pose** to trigger custom actions from body movement, e.g. wave
 your arms down to **dim** the lights after they've turned on.
@@ -205,7 +219,7 @@ your arms down to **dim** the lights after they've turned on.
 - Stretch: **custom-train** a model to auto-detect doorways, removing the manual
   setup step from V2.
 
-### V4 — Govee Cloud backend *(nice-to-have, any time)*
+### V5 — Govee Cloud backend *(nice-to-have, any time)*
 
 Support bulbs that **don't** expose the LAN API by adding cloud control. Lower
 risk and independent of the vision work, so it can slot in whenever:
