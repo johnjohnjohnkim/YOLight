@@ -11,3 +11,5 @@ venv/
 tests/
 
 *.pyc
+
+test.py
