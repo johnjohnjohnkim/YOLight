@@ -2,10 +2,15 @@ from socket import *
 import json
 
 import control
+from config import env
 
 UDP_IP = "239.255.255.250" # Govee multicast group address
 SEND_PORT = 4001    # Devices listen here for commands
-LISTEN_PORT = 4002  # Devices reply here
+LISTEN_PORT = 4002  # Devices reply to the multicast group on this port
+
+# Local IP of the interface on the SAME network as the Govee devices. Set
+# explicitly so multicast doesn't leave via a VPN/WSL/Hyper-V adapter on Windows.
+LOCAL_IP = env.IP_ADDR
 
 devices = [] # Populated by discover_devices()
 
@@ -14,10 +19,18 @@ def discover_devices():
     """Broadcast a scan request and collect every Govee device that replies."""
     print("Scanning for Govee devices...")
 
-    sendSocket = socket(AF_INET, SOCK_DGRAM)
+    # Listen socket must JOIN the multicast group to hear device replies.
     listenSocket = socket(AF_INET, SOCK_DGRAM)
+    listenSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
     listenSocket.bind(("", LISTEN_PORT))
-    listenSocket.settimeout(240) # Stop scanning after 4 minutes of silence
+    mreq = inet_aton(UDP_IP) + inet_aton(LOCAL_IP)
+    listenSocket.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq)
+    listenSocket.settimeout(3) # Stop scanning after a few seconds of silence
+
+    # Send socket: pin the outgoing interface for multicast.
+    sendSocket = socket(AF_INET, SOCK_DGRAM)
+    sendSocket.setsockopt(IPPROTO_IP, IP_MULTICAST_IF, inet_aton(LOCAL_IP))
+    sendSocket.setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, 2)
 
     scan_msg = json.dumps({
         "msg": {
@@ -33,11 +46,11 @@ def discover_devices():
         try:
             data, addr = listenSocket.recvfrom(1024)
             response = json.loads(data.decode())
-            devices.append(response["msg"]["data"])
+            device = response["msg"]["data"]
+            devices.append(device)
+            print(f"  + Found {device.get('sku', 'unknown model')} at {device['ip']}")
         except timeout: # No more replies coming in
             print(f"Done scanning. Found {len(devices)} device(s).")
-            for device in devices:
-                print(f"  - {device.get('sku', 'unknown model')} at {device['ip']}")
             break
 
     sendSocket.close()
