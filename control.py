@@ -1,3 +1,7 @@
+# Low-level Govee LAN API client. Unlike server.py (which handles device
+# discovery over multicast), this module sends unicast UDP commands directly
+# to a single device's known IP address, e.g. turning it on/off.
+
 from socket import socket, AF_INET, SOCK_DGRAM
 import json
 

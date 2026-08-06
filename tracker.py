@@ -1,3 +1,10 @@
+# Main entry point for YOLight: watches a camera feed with a YOLOv8 model to
+# detect whether a person is in frame, and turns the Govee lights (via
+# server.py) on/off accordingly. Lights come on as soon as someone is
+# detected, but switching off is debounced with a grace period so brief
+# gaps in detection (e.g. someone standing still or briefly out of frame)
+# don't cause flickering.
+
 import cv2
 import torch
 from ultralytics import YOLO

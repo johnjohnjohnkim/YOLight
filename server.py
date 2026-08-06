@@ -1,3 +1,9 @@
+# Govee device discovery and fleet-level on/off control. Finds every Govee
+# light on the local network via the Govee LAN API's multicast scan, keeps
+# the results in the module-level `devices` list, and drives them all at
+# once via turn_lights_on()/turn_lights_off(). Per-device commands are
+# delegated to control.py. tracker.py is the main consumer of this module.
+
 from socket import *
 import json
 
