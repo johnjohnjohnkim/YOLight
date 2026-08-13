@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings
 class Env(BaseSettings):
     # IP address of the machine running this app, read from IP_ADDR in .env.
     IP_ADDR: str
+    GOVEE_API: str
 
     class Config:
         env_file = ".env"
