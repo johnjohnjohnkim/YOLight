@@ -237,6 +237,50 @@ class ClapDetector:
         return clapped
 
 
+class ActivationGate:
+    """Requires both wrists raised above both shoulders, held continuously for
+    HOLD_SECONDS, before the clap toggle is allowed to fire -- so it doesn't
+    get set off by hands merely being close together for some other reason
+    (e.g. holding a phone with both hands). The hold-time requirement
+    additionally guards against momentarily raising an arm while
+    gesturing/stretching/etc.
+    """
+
+    CONF_THRESHOLD = 0.5
+    HOLD_SECONDS = 1.0
+
+    LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
+    LEFT_WRIST, RIGHT_WRIST = 9, 10
+
+    def __init__(self):
+        self.armed = False
+        self.raised_since = None  # timestamp the pose started being held, or None if not currently held
+
+    def update(self, keypoints):
+        """Check this frame's pose keypoints and return whether the gate is armed."""
+        raised_now = False
+
+        if keypoints is not None and keypoints.conf is not None and len(keypoints) > 0:
+            kpts = keypoints.xy[0]
+            confs = keypoints.conf[0]
+
+            required = (self.LEFT_SHOULDER, self.RIGHT_SHOULDER, self.LEFT_WRIST, self.RIGHT_WRIST)
+            if all(confs[i] > self.CONF_THRESHOLD for i in required):
+                left_shoulder, right_shoulder = kpts[self.LEFT_SHOULDER], kpts[self.RIGHT_SHOULDER]
+                left_wrist, right_wrist = kpts[self.LEFT_WRIST], kpts[self.RIGHT_WRIST]
+
+                # Image y grows downward, so "above" means a smaller y value.
+                raised_now = left_wrist[1] < left_shoulder[1] and right_wrist[1] < right_shoulder[1]
+
+        if raised_now and self.raised_since is None:
+            self.raised_since = time.time()
+        elif not raised_now:
+            self.raised_since = None
+
+        self.armed = self.raised_since is not None and time.time() - self.raised_since >= self.HOLD_SECONDS
+        return self.armed
+
+
 def main():
     # A pose model still detects person boxes (for occupancy) alongside
     # keypoints (for the clap gesture), so one model/one inference pass covers both.
@@ -247,13 +291,16 @@ def main():
     dx, dy, dw, dh = door_zone
     occupancy = OccupancyTracker(door_zone)
     clap_detector = ClapDetector()
+    activation_gate = ActivationGate()
 
     # Discover Govee devices before we start watching.
-    server.discover_devices()
+    # server.discover_devices()
+    # Commented out as it currently interferes on different networks for dev.
 
     # --- Occupancy state ---
     lights_on = False
     clapped_bool = False  # True while a clap is overriding the presence-based auto-on
+    clap_flash_until = 0  # time.time() value until which to show a "CLAP!" flash
 
     # --- Main tracking loop ---
     while camera.isOpened():
@@ -273,8 +320,9 @@ def main():
                 if int(cls) == 0
             ]
 
-            if clap_detector.update(r.keypoints):
-                print("clapped")
+            armed = activation_gate.update(r.keypoints)
+            if armed and clap_detector.update(r.keypoints):
+                clap_flash_until = time.time() + 1.0
                 lights_on = not lights_on
                 if lights_on:
                     server.turn_lights_on()
@@ -303,6 +351,24 @@ def main():
             # Uncomment to view the annotated feed for debugging
             annotated_frame = r.plot()
             cv2.rectangle(annotated_frame, (dx, dy), (dx + dw, dy + dh), (0, 255, 0), 2)
+
+            # Activation gate status: holding countdown while raising, armed state once held.
+            if activation_gate.raised_since is not None and not armed:
+                held_for = time.time() - activation_gate.raised_since
+                gate_status = f"HOLDING {held_for:.1f}/{activation_gate.HOLD_SECONDS}s"
+                gate_color = (0, 255, 255)
+            else:
+                gate_status = f"ARMED: {armed}"
+                gate_color = (0, 255, 0) if armed else (0, 0, 255)
+            cv2.putText(annotated_frame, gate_status, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, gate_color, 2)
+
+            cv2.putText(annotated_frame, f"LIGHTS: {'ON' if lights_on else 'OFF'}", (10, 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0) if lights_on else (0, 0, 255), 2)
+
+            if time.time() < clap_flash_until:
+                cv2.putText(annotated_frame, "CLAP!", (10, 100),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
 
             cv2.imshow("Video", annotated_frame)
 
