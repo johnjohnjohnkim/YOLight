@@ -1,14 +1,18 @@
-# Govee device discovery and fleet-level on/off control. Finds every Govee
-# light on the local network via the Govee LAN API's multicast scan, keeps
-# the results in the module-level `devices` list, and drives them all at
-# once via turn_lights_on()/turn_lights_off(). Per-device commands are
-# delegated to control.py. tracker.py is the main consumer of this module.
+# Govee light control. Primary channel is Govee's cloud HTTP API
+# (openapi.api.govee.com); if a cloud request fails to connect, falls back
+# to direct LAN control via the Govee LAN API (multicast discovery +
+# control.py). tracker.py is the main consumer of this module.
 
 from socket import *
 import json
+import uuid
+
+import requests
 
 import control
 from config import env
+
+# --- LAN (backup) ---
 
 UDP_IP = "239.255.255.250" # Govee multicast group address
 SEND_PORT = 4001    # Devices listen here for commands
@@ -18,7 +22,7 @@ LISTEN_PORT = 4002  # Devices reply to the multicast group on this port
 # explicitly so multicast doesn't leave via a VPN/WSL/Hyper-V adapter on Windows.
 LOCAL_IP = env.IP_ADDR
 
-devices = [] # Populated by discover_devices()
+devices = [] # LAN devices, populated by discover_devices()
 
 
 def discover_devices():
@@ -64,16 +68,69 @@ def discover_devices():
     return devices
 
 
+# --- Cloud HTTP API (primary) ---
+
+GOVEE_BASE_URL = "https://openapi.api.govee.com"
+GOVEE_HEADERS = {
+    "Content-Type": "application/json",
+    "Govee-API-Key": env.GOVEE_API,
+}
+
+cloud_devices = [] # Cloud devices, populated by fetch_cloud_devices()
+
+
+def fetch_cloud_devices():
+    """Fetch the account's devices from Govee's cloud API."""
+    response = requests.get(f"{GOVEE_BASE_URL}/router/api/v1/user/devices", headers=GOVEE_HEADERS)
+    response.raise_for_status()
+    cloud_devices.clear()
+    cloud_devices.extend(response.json()["data"])
+    return cloud_devices
+
+
+def _cloud_turn(device, on: bool):
+    body = {
+        "requestId": str(uuid.uuid4()),
+        "payload": {
+            "sku": device["sku"],
+            "device": device["device"],
+            "capability": {
+                "type": "devices.capabilities.on_off",
+                "instance": "powerSwitch",
+                "value": 1 if on else 0,
+            },
+        },
+    }
+    response = requests.post(f"{GOVEE_BASE_URL}/router/api/v1/device/control", headers=GOVEE_HEADERS, json=body)
+    response.raise_for_status()
+    
+
+
+# --- Combined control: cloud first, LAN as backup ---
+
+def _turn_lights(on: bool):
+    try:
+        if not cloud_devices:
+            fetch_cloud_devices()
+        for device in cloud_devices:
+            _cloud_turn(device, on)
+        print(f"Turned lights {'on' if on else 'off'} via cloud API ({len(cloud_devices)} device(s))")
+    except requests.exceptions.RequestException:
+        print("Cloud API unreachable, falling back to LAN control")
+        if not devices:
+            discover_devices()
+        for device in devices:
+            control.send_turn_command(device["ip"], on)
+        print(f"Turned lights {'on' if on else 'off'} via LAN ({len(devices)} device(s))")
+
+
 def turn_lights_on():
-    print(f"Turning lights on ({len(devices)} device(s))")
-    for device in devices:
-        control.send_turn_command(device["ip"], True)
+    _turn_lights(True)
 
 
 def turn_lights_off():
-    print(f"Turning lights off ({len(devices)} device(s))")
-    for device in devices:
-        control.send_turn_command(device["ip"], False)
+    _turn_lights(False)
+
 
 if __name__ == "__main__":
     discover_devices()

@@ -21,3 +21,5 @@ runs/
 doorway/
 
 *.json
+
+*test*.py
