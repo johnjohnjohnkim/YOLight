@@ -22,4 +22,4 @@ doorway/
 
 *.json
 
-*test*.py
+*[tT]est*
