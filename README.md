@@ -2,73 +2,105 @@
 
 **YOL**O + **Light** — automatic occupancy lighting powered by computer vision.
 
-YOLight watches a camera feed with a YOLO object-detection model and turns your
-[Govee](https://www.govee.com/) smart lights **on** when a person walks into
-frame and **off** shortly after everyone leaves. No motion sensors, no smart
-plugs, no cloud account — everything runs locally on your machine and talks to
-the lights directly over your LAN using Govee's UDP LAN API.
+YOLight watches a camera feed with a YOLO pose model and turns your
+[Govee](https://www.govee.com/) smart lights **on** when someone enters the
+room and **off** after they've actually left — tracked by doorway crossings,
+not just by whether they're currently visible in frame. A clap gesture can
+also toggle the lights directly. No motion sensors, no smart plugs required —
+YOLight talks to your lights over Govee's cloud API, falling back to the
+local LAN API if the cloud is unreachable.
 
-> **V1** — first working release.
+> **V2** — doorway occupancy tracking, gesture toggle, and cloud-first light
+> control.
 
 ---
 
 ## How it works
 
 ```
-┌────────────┐   frames   ┌─────────────┐   on/off    ┌────────────┐   UDP    ┌────────────┐
-│   Camera   │ ─────────► │ YOLO model  │ ──────────► │  server /  │ ───────► │   Govee    │
-│ (webcam)   │            │ (tracker.py)│  occupancy  │  control   │  LAN API │   lights   │
-└────────────┘            └─────────────┘             └────────────┘          └────────────┘
+┌────────────┐   frames   ┌──────────────┐  door crossings /  ┌────────────┐  cloud API   ┌────────────┐
+│   Camera   │ ─────────► │ YOLO pose    │  clap gesture      │  server /  │  (LAN backup)│   Govee    │
+│ (webcam)   │            │ (tracker.py) │ ──────────────────►│  control   │ ───────────► │   lights   │
+└────────────┘            └──────────────┘                    └────────────┘              └────────────┘
 ```
 
-1. **`tracker.py`** captures frames from a webcam and runs them through the
-   [Ultralytics YOLOv8](https://docs.ultralytics.com/) model (`yolov8s.pt`),
-   using CUDA if an NVIDIA GPU is available and falling back to CPU otherwise.
-2. Each frame is checked for the COCO **`person`** class (class id `0`).
-3. A small occupancy state machine decides when to switch the lights:
-   - **Person appears** → lights turn **on** immediately.
-   - **Person leaves** → a **3-second grace period** starts (debounce), and if no
-     one returns before it elapses, the lights turn **off**.
-4. **`server.py`** discovers Govee devices on the network and broadcasts on/off
-   commands; **`control.py`** formats and sends the actual Govee LAN API
-   packets to each device.
+1. **`tracker.py`** captures frames from a webcam and runs them through a
+   [YOLO pose model](https://docs.ultralytics.com/) (`yolo26n-pose.pt`),
+   using CUDA if an NVIDIA GPU is available and falling back to CPU
+   otherwise. A pose model still reports COCO **`person`** boxes (class id
+   `0`) alongside body keypoints, so one inference pass covers both
+   occupancy and gesture detection.
+2. On first run (or whenever you ask it to), YOLight has you draw a **door
+   zone** — a box around the doorway — on the camera view. It's saved to
+   `door_zone.json` and reused on future runs.
+3. An **`OccupancyTracker`** follows a single representative person centroid
+   across frames and watches it cross the left/right edges of the door zone:
+   entering the doorway from one side and disappearing from the other side
+   counts as a room entry or exit. This means occupancy tracks whether
+   someone has actually **left the room**, not merely left the frame — a
+   person briefly occluded (behind furniture, out of the shot) doesn't cause
+   a false "room is empty" read, up to `MISSING_GRACE` (15 frames) of
+   missing detections.
+4. Raising both wrists above both shoulders and holding the pose for a
+   second **arms** a gesture toggle; a subsequent "clap" (wrists brought
+   together twice within 2 seconds) then toggles the lights directly,
+   overriding the occupancy-driven state until the next fresh room entry.
+5. **`server.py`** turns the lights on/off: it tries Govee's **cloud HTTP
+   API** first, and if that's unreachable it discovers Govee devices on the
+   local network and falls back to the LAN API; **`control.py`** formats and
+   sends the actual LAN "turn" command packets.
 
 ### Reliability: the occlusion problem
 
-The first cut turned lights on and off **instantly** with the camera's view. This
-looked great in a demo but failed constantly in real use: any time the person was
-briefly hidden from the camera — reaching behind a closet door for clothes, ducking
-behind a chair — the system read the room as empty and cut the lights, only to
-snap them back on a second later.
+The first cut of this project turned lights on and off **instantly** with
+the camera's view. This looked great in a demo but failed constantly in real
+use: any time a person was briefly hidden from the camera — reaching behind
+a closet door for clothes, ducking behind a chair — the system read the room
+as empty and cut the lights, only to snap them back on a second later.
 
-Adding the **3-second debounce** on turn-off (turn on instantly, but wait before
-turning off) cut these false turn-offs from an average of **~31 per day** down to
-**~9 per day** — a ~70% reduction — while keeping the "walk in, lights on" response
-feeling instant.
+That version added a flat **3-second debounce** on turn-off (turn on
+instantly, but wait before turning off), which cut false turn-offs from an
+average of **~31 per day** down to **~9 per day** — a ~70% reduction — while
+keeping the "walk in, lights on" response feeling instant. Those numbers
+describe that earlier time-based debounce specifically; they haven't been
+re-measured against the current doorway-tracking approach, which replaces
+the flat timer with the frame-count occlusion tolerance described above (a
+person only needs to be "missing" for a while, not out of the room, to be
+tolerated) plus, more importantly, entry/exit detection that doesn't rely on
+current visibility at all.
 
-The remaining failures are longer occlusions that outlast the grace period.
-Eliminating them entirely is the goal of **V2's doorway occupancy counting**
-(see the [Roadmap](#roadmap)), which tracks whether a person has actually *left
-the room* rather than merely *left the frame*.
+The remaining failure mode is occlusion lasting longer than
+`MISSING_GRACE` while a person is mid-doorway — the tracker sees them vanish
+from a section it can't yet call "inside" or "outside." Reducing that
+further is the direction for future tuning (see [Roadmap](#roadmap)).
 
 ---
 
 ## Project layout
 
-| File              | Responsibility                                                                 |
-| ----------------- | ------------------------------------------------------------------------------ |
-| `tracker.py`      | Main entry point. Camera capture, YOLO inference, and the occupancy state machine. |
-| `server.py`       | Govee device discovery via multicast + high-level `turn_lights_on/off` helpers. |
-| `control.py`      | Builds and sends the per-device Govee LAN "turn" command over UDP.             |
-| `config.py`       | Loads settings (your local network IP) from a `.env` file via pydantic.        |
-| `requirements.txt`| Python dependencies.                                                            |
+| File                        | Responsibility                                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `tracker.py`                | Main entry point. Camera capture, YOLO pose inference, door-zone setup, occupancy tracking, and gesture detection. |
+| `server.py`                 | Govee light control: cloud HTTP API (primary) with LAN multicast discovery + control (fallback).         |
+| `control.py`                | Builds and sends the per-device Govee LAN "turn" command over UDP (used by the LAN fallback path).        |
+| `config.py`                 | Loads settings (`IP_ADDR`, `GOVEE_API`) from a `.env` file via pydantic.                                  |
+| `requirements.txt`          | Python dependencies.                                                                                      |
+| `YOLODoorwayDetection.ipynb`| Experimental notebook for custom-training a model to auto-detect doorways. Not currently wired into `tracker.py`. |
+
+`door_zone.json` (your saved door zone) and the `.pt` model weight files are
+generated/downloaded locally and are git-ignored.
 
 ---
 
-## The Govee LAN protocol
+## The Govee protocol
 
-YOLight speaks Govee's local UDP API, so the lights must have **LAN Control
-enabled** in the Govee Home app (Device Settings → LAN Control).
+YOLight controls lights two ways, in this order:
+
+1. **Cloud HTTP API** (`https://openapi.api.govee.com`) — used first if a
+   `GOVEE_API` key is configured and reachable.
+2. **LAN UDP API** (fallback) — used if the cloud call fails. This requires
+   the lights to have **LAN Control enabled** in the Govee Home app (Device
+   Settings → LAN Control).
 
 | Port   | Direction        | Purpose                                             |
 | ------ | ---------------- | --------------------------------------------------- |
@@ -76,24 +108,26 @@ enabled** in the Govee Home app (Device Settings → LAN Control).
 | `4002` | devices → group  | Listen port — devices reply to the multicast group. |
 | `4003` | app → devices    | Control port — direct on/off/color commands.        |
 
-Discovery works by sending a `scan` request to the multicast group
+LAN discovery works by sending a `scan` request to the multicast group
 `239.255.255.250` and collecting every device that replies.
 
 ---
 
 ## Requirements
 
-- Python 3.11+ (developed against a 3.14 virtual environment)
+- Python 3.11+ (the checked-in `venv/` is a Python 3.11 environment)
 - A webcam
-- One or more Govee lights with **LAN Control** enabled, on the **same network**
-  as the machine running YOLight
+- A [Govee Developer API key](https://developer.govee.com/reference/apply-you-govee-api-key)
+  (see [Setup](#setup)), and/or one or more Govee lights with **LAN
+  Control** enabled on the same network as the machine running YOLight
 - Optional: an NVIDIA GPU with CUDA for faster inference (CPU works too)
 
 Key dependencies (see `requirements.txt` for the full pinned list):
-`ultralytics`, `torch` / `torchvision`, `opencv-python`, `pydantic-settings`.
+`ultralytics`, `torch` / `torchvision`, `opencv-python`, `pydantic-settings`,
+`requests`.
 
-> **Note:** the YOLO weights file (`yolov8s.pt`) is git-ignored and downloaded
-> automatically by Ultralytics on first run.
+> **Note:** the YOLO weights file (`yolo26n-pose.pt`) is git-ignored and
+> downloaded automatically by Ultralytics on first run.
 
 ---
 
@@ -116,18 +150,30 @@ Key dependencies (see `requirements.txt` for the full pinned list):
    pip install -r requirements.txt
    ```
 
-3. **Create a `.env` file** in the project root with the local IP of the network
-   interface that shares a subnet with your Govee lights. This is set explicitly
-   so multicast traffic doesn't leak out of a VPN/WSL/Hyper-V adapter on Windows.
+3. **Get a Govee API key.** Install the Govee Home app and request a
+   developer API key from within the app, following
+   [Govee's API key application instructions](https://developer.govee.com/reference/apply-you-govee-api-key).
+   The whole process — request to key arriving in your inbox — typically
+   takes less than 5 minutes.
+
+4. **Create a `.env` file** in the project root:
    ```env
    IP_ADDR=192.168.1.42
+   GOVEE_API=your-govee-api-key
    ```
+   - `IP_ADDR` is the local IP of the network interface that shares a subnet
+     with your Govee lights, used for the LAN fallback path. This is set
+     explicitly so multicast traffic doesn't leak out of a VPN/WSL/Hyper-V
+     adapter on Windows.
+   - `GOVEE_API` is the developer key from step 3, used for the primary
+     cloud control path.
 
 ---
 
 ## Usage
 
-**Discover your lights** (a quick sanity check that the network is set up right):
+**Discover your lights over LAN** (a quick sanity check that the network is
+set up right for the fallback path):
 
 ```bash
 python server.py
@@ -147,94 +193,97 @@ Done scanning. Found 1 device(s).
 python tracker.py
 ```
 
-YOLight will pick a camera (index `0` on macOS, index `1` on Windows), discover
-your Govee devices, and start watching. Walk into frame and the lights come on;
-step away and, after the grace period, they turn off. Press **`q`** in the video
-window to quit.
+YOLight will pick a camera (index `0` on macOS, index `1` on Windows). If no
+door zone has been saved yet, it'll grab a frame and ask you to drag a box
+around the doorway (press ENTER/SPACE to confirm, `c` to cancel); on later
+runs it shows the saved zone and lets you press `r` to redraw it, or any
+other key to keep it.
 
-To watch what the model sees, uncomment the `annotated_frame` / `cv2.imshow`
-lines near the bottom of `tracker.py`.
+Once running, a video window shows the live feed with an overlay: the
+door-zone box, gesture-arming status, and current lights state. Walk through
+the doorway and the lights track room occupancy; raise both wrists for a
+second to arm the gesture toggle, then bring your wrists together twice
+within 2 seconds to clap the lights on/off directly. Press **`q`** in the
+video window to quit.
 
 ---
 
 ## Configuration notes
 
-- **Camera index** is chosen by platform in `tracker.py`. If the wrong camera
-  opens (or none does), adjust the `cv2.VideoCapture(...)` index.
-- **Grace period** for turning lights off after the last person leaves defaults
-  to **3 seconds**, set by the timeout comparison in the occupancy state machine
-  in `tracker.py`. Longer = fewer false turn-offs from occlusion, but lights
-  linger longer after you actually leave. Tune it to taste.
-- **Model size**: `yolov8s.pt` (small) balances speed and accuracy. Swap it for
-  `yolov8n.pt` (nano, faster) or a larger variant depending on your hardware.
+- **Camera index** is chosen by platform in `tracker.py`. If the wrong
+  camera opens (or none does), adjust the `cv2.VideoCapture(...)` index.
+- **Door zone**: redraw it (press `r` on startup, or delete
+  `door_zone.json`) any time the camera moves — the saved coordinates are
+  tied to the camera's exact position and framing.
+- **Occlusion tolerance** for the doorway tracker defaults to
+  `OccupancyTracker.MISSING_GRACE = 15` frames of missing detections before
+  a mid-doorway disappearance is *not* counted as an exit. Higher = more
+  tolerant of long occlusions, but slower to register a genuine exit.
+- **Model**: `yolo26n-pose.pt` is used for both occupancy (person boxes) and
+  gesture detection (keypoints), since a pose model reports both from one
+  inference pass.
+
+---
+
+## Testing (local dev only)
+
+`tests/` (unit tests for the occupancy state machine) and `serverTest.py`
+(a manual light on/off smoke-test script) exist for local development but
+are git-ignored and not part of the tracked repo, so they won't come along
+with a fresh clone. The occupancy unit tests mock out `cv2`/`torch`/
+`ultralytics`/`server` to exercise `tracker.py`'s decision logic without a
+camera or real lights; they currently target an earlier version of the
+tracking logic and are not all passing against the current doorway-tracking
+implementation.
 
 ---
 
 ## Roadmap
 
-Ordered by priority, not just by version number.
+### Now — Doorway occupancy tracking, gesture toggle, cloud control ✅ *(current, V2)*
 
-### V1 — Instant occupancy lighting ✅ *(current)*
+- Room occupancy is tracked by **doorway line crossings**, not raw
+  per-frame visibility, so occlusion no longer causes false turn-offs (see
+  [Reliability](#reliability-the-occlusion-problem)).
+- A **clap gesture**, gated by a held both-wrists-raised pose, toggles the
+  lights directly.
+- Lights are controlled via **Govee's cloud API**, falling back to the LAN
+  API automatically if the cloud is unreachable.
 
-Real-time person detection drives the lights, with a 3-second turn-off debounce
-that cut false turn-offs from ~31/day to ~9/day (see
-[Reliability](#reliability-the-occlusion-problem)).
+### Next — Rounding out gesture control
 
-### V2 — Doorway occupancy counting *(next)*
+- **Dimming**: wave arms down to dim the lights after they've turned on, not
+  just an on/off clap toggle.
+- **Mic + camera fusion**: cross-confirm the clap with audio so a stretch
+  isn't misread as a clap and an unrelated noise isn't misread as one either.
+- **Auto-doorway detection**: custom-train a model (see
+  `YOLODoorwayDetection.ipynb`, currently unused/experimental) to detect the
+  doorway automatically, removing the manual box-drawing step.
 
-Eliminate occlusion false-offs entirely by tracking whether a person actually
-**left the room** rather than merely **left the frame**:
+### Depth sensing for low-light / darkness
 
-- User sets a **doorway line/region** on the camera view during setup.
-- The existing YOLO **tracker** (persistent track IDs) counts people crossing
-  the line — inward increments occupancy, outward decrements it.
-- Lights stay on while `occupancy > 0`, regardless of who's currently visible.
+Fix the biggest functional gap: a plain RGB camera is **blind in the dark**,
+so the one moment you most want automatic lighting — walking into a
+pitch-black room — is exactly when detection fails and you're forced to
+flip the switch by hand. The plan is to use an **Intel RealSense D435**,
+whose active-IR depth stream sees in **total darkness** without any visible
+light.
 
-This is the killer feature: it turns "lights that follow the camera" into
-"lights that follow the room."
-
-### V3 — Depth sensing for low-light / darkness
-
-Fix the biggest functional gap: a plain RGB camera is **blind in the dark**, so
-the one moment you most want automatic lighting — walking into a pitch-black
-room — is exactly when detection fails and you're forced to flip the switch by
-hand. The project uses an **Intel RealSense D435**, whose active-IR depth stream
-sees in **total darkness** without any visible light.
-
-- Detect people on the **depth / IR stream** when the RGB frame is too dark, then
-  hand back to normal RGB + YOLO once the lights are on.
+- Detect people on the **depth / IR stream** when the RGB frame is too dark,
+  then hand back to normal RGB + YOLO once the lights are on.
 - Uses `pyrealsense2` to pull aligned depth + color frames from the D435.
-- Another **sensor-fusion** robustness win, alongside V2 (occlusion) and V4
-  (false gestures): each targets a distinct failure mode of naive vision.
-
-### V4 — Gesture & pose control
-
-Swap in **YOLOv8-pose** to trigger custom actions from body movement, e.g. wave
-your arms down to **dim** the lights after they've turned on.
-
-- Gestures like "clap twice to turn off" fuse **camera + mic**: the two signals
-  cross-confirm each other to reject false positives — the mic rules out the
-  vision model mistaking a stretch for a clap, and the camera rules out an
-  accidental crashing noise being read as a deliberate double-clap.
-- Stretch: **custom-train** a model to auto-detect doorways, removing the manual
-  setup step from V2.
-
-### V5 — Govee Cloud backend *(nice-to-have, any time)*
-
-Support bulbs that **don't** expose the LAN API by adding cloud control. Lower
-risk and independent of the vision work, so it can slot in whenever:
-
-- Introduce a `LightBackend` abstraction with `LANBackend` and `CloudBackend`
-  implementations, so the detection logic doesn't care how a light is reached.
-- Authenticate against the Govee Cloud API and route commands per-device.
+- Not started yet — no `pyrealsense2` usage exists in the codebase today.
 
 ### Smaller improvements (any time)
 
-- Configurable grace period and camera index via `.env`
-- Color / brightness control (the LAN API supports more than on/off)
+- Configurable occlusion tolerance and camera index via `.env`
+- Color / brightness control (the LAN and cloud APIs both support more than
+  on/off)
 - Multi-room support keyed by which devices to control
 - Headless / service mode
+- Bring the `tests/` suite up to date with the current doorway-tracking
+  logic and track it in git
 
 ---
 
-*V1 — built with YOLOv8, OpenCV, and the Govee LAN API.*
+*V2 — built with a YOLO pose model, OpenCV, and the Govee cloud + LAN APIs.*
