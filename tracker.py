@@ -11,6 +11,7 @@ from ultralytics import YOLO
 import sys
 import json
 import os
+import threading
 import time
 from enum import Enum
 
@@ -185,17 +186,17 @@ class OccupancyTracker:
 
 
 class ClapDetector:
-    """Detects a clap gesture: left and right wrists meeting twice within CLAP_WINDOW seconds."""
+    """Detects a clap gesture: left and right wrists meeting."""
 
     CONF_THRESHOLD = 0.5
-    CLAP_WINDOW = 2.0  # seconds within which two "together" events count as a clap
+    COOLDOWN_SECONDS = 0.5  # ignore further claps for this long after one fires, so jittery detections don't retrigger
 
     LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
     LEFT_WRIST, RIGHT_WRIST = 9, 10
 
     def __init__(self):
         self.wrists_were_together = False
-        self.together_timestamps = []
+        self.cooldown_until = 0
 
     def update(self, keypoints):
         """Check this frame's pose keypoints for a wrists-together event.
@@ -224,14 +225,10 @@ class ClapDetector:
                 threshold = shoulder_width * 0.6
 
         wrists_together_now = wrist_dist < threshold
-        clapped = False
-
-        if wrists_together_now and not self.wrists_were_together:
-            now = time.time()
-            self.together_timestamps = [t for t in self.together_timestamps if now - t < self.CLAP_WINDOW] + [now]
-            if len(self.together_timestamps) >= 2:
-                clapped = True
-                self.together_timestamps = []
+        now = time.time()
+        clapped = wrists_together_now and not self.wrists_were_together and now >= self.cooldown_until
+        if clapped:
+            self.cooldown_until = now + self.COOLDOWN_SECONDS
 
         self.wrists_were_together = wrists_together_now
         return clapped
@@ -247,8 +244,7 @@ class ActivationGate:
     """
 
     CONF_THRESHOLD = 0.5
-    HOLD_SECONDS = 1.0
-
+    HOLD_SECONDS = 0.3
     LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
     LEFT_WRIST, RIGHT_WRIST = 9, 10
 
@@ -324,10 +320,8 @@ def main():
             if armed and clap_detector.update(r.keypoints):
                 clap_flash_until = time.time() + 1.0
                 lights_on = not lights_on
-                if lights_on:
-                    server.turn_lights_on()
-                else:
-                    server.turn_lights_off()
+                target = server.turn_lights_on if lights_on else server.turn_lights_off
+                threading.Thread(target=target, daemon=True).start()
                 clapped_bool = True
 
             room_count_before = occupancy.room_count
@@ -342,10 +336,10 @@ def main():
             if not clapped_bool:
                 should_be_on = visible_count > 0 or occupancy.room_count > 0
                 if should_be_on and not lights_on:
-                    server.turn_lights_on()
+                    threading.Thread(target=server.turn_lights_on, daemon=True).start()
                     lights_on = True
                 elif not should_be_on and lights_on:
-                    server.turn_lights_off()
+                    threading.Thread(target=server.turn_lights_off, daemon=True).start()
                     lights_on = False
 
             # Uncomment to view the annotated feed for debugging
