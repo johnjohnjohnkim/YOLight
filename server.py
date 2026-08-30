@@ -3,6 +3,7 @@
 # to direct LAN control via the Govee LAN API (multicast discovery +
 # control.py). tracker.py is the main consumer of this module.
 
+from concurrent.futures import ThreadPoolExecutor
 from socket import *
 import json
 import uuid
@@ -112,17 +113,19 @@ def _turn_lights(on: bool):
     try:
         if not cloud_devices:
             fetch_cloud_devices()
-        for device in cloud_devices:
-            _cloud_turn(device, on)
+        with ThreadPoolExecutor(max_workers=len(cloud_devices)) as pool:
+            list(pool.map(lambda device: _cloud_turn(device, on), cloud_devices))
         print(f"Turned lights {'on' if on else 'off'} via cloud API ({len(cloud_devices)} device(s))")
     except requests.exceptions.RequestException:
         print("Cloud API unreachable, falling back to LAN control")
         if not devices:
             discover_devices()
-        for device in devices:
-            control.send_turn_command(device["ip"], on)
+        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+            list(pool.map(lambda device: control.send_turn_command(device["ip"], on), devices))
         print(f"Turned lights {'on' if on else 'off'} via LAN ({len(devices)} device(s))")
 
+# def _activation(colour: str):
+    
 
 def turn_lights_on():
     _turn_lights(True)
@@ -130,6 +133,9 @@ def turn_lights_on():
 
 def turn_lights_off():
     _turn_lights(False)
+
+def activation_on():
+    _activation("Orange")
 
 
 if __name__ == "__main__":
