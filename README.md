@@ -10,8 +10,8 @@ also toggle the lights directly. No motion sensors, no smart plugs required —
 YOLight talks to your lights over Govee's cloud API, falling back to the
 local LAN API if the cloud is unreachable.
 
-> **V2** — doorway occupancy tracking, gesture toggle, and cloud-first light
-> control.
+> **V3** — doorway occupancy tracking, gated single-clap toggle, and
+> cloud-first light control.
 
 ---
 
@@ -34,21 +34,27 @@ local LAN API if the cloud is unreachable.
    zone** — a box around the doorway — on the camera view. It's saved to
    `door_zone.json` and reused on future runs.
 3. An **`OccupancyTracker`** follows a single representative person centroid
-   across frames and watches it cross the left/right edges of the door zone:
-   entering the doorway from one side and disappearing from the other side
-   counts as a room entry or exit. This means occupancy tracks whether
+   across frames against the left/right edges of the door zone: a person
+   **appearing** in frame counts as a room entry, and a person who steps
+   into the doorway from one side and then **vanishes mid-doorway** —
+   crossed one line but never the other — counts as a room exit. This means
+   occupancy tracks whether
    someone has actually **left the room**, not merely left the frame — a
    person briefly occluded (behind furniture, out of the shot) doesn't cause
    a false "room is empty" read, up to `MISSING_GRACE` (15 frames) of
    missing detections.
-4. Raising both wrists above both shoulders and holding the pose for a
-   second **arms** a gesture toggle; a subsequent "clap" (wrists brought
-   together twice within 2 seconds) then toggles the lights directly,
-   overriding the occupancy-driven state until the next fresh room entry.
+4. Raising both wrists above both shoulders and holding the pose for
+   **0.3 s** — tuned by trial and error to feel natural without firing
+   accidentally — **arms** a gesture toggle; a **single clap** (wrists
+   brought together, with a 0.5 s cooldown against jittery re-triggers)
+   then toggles the lights directly, overriding the occupancy-driven state
+   until the next fresh room entry.
 5. **`server.py`** turns the lights on/off: it tries Govee's **cloud HTTP
    API** first, and if that's unreachable it discovers Govee devices on the
    local network and falls back to the LAN API; **`control.py`** formats and
-   sends the actual LAN "turn" command packets.
+   sends the actual LAN "turn" command packets. Commands run on background
+   threads and fan out to all devices in parallel, so multiple lights
+   switch in sync without stalling detection.
 
 ### Reliability: the occlusion problem
 
@@ -72,7 +78,8 @@ current visibility at all.
 The remaining failure mode is occlusion lasting longer than
 `MISSING_GRACE` while a person is mid-doorway — the tracker sees them vanish
 from a section it can't yet call "inside" or "outside." Reducing that
-further is the direction for future tuning (see [Roadmap](#roadmap)).
+further is the direction for future tuning (see
+[the roadmap](#version-history--roadmap)).
 
 ---
 
@@ -115,7 +122,7 @@ LAN discovery works by sending a `scan` request to the multicast group
 
 ## Requirements
 
-- Python 3.11+ (the checked-in `venv/` is a Python 3.11 environment)
+- Python 3.12+ (the pinned `numpy`/`scipy` require ≥3.12; verified on 3.14)
 - A webcam
 - A [Govee Developer API key](https://developer.govee.com/reference/apply-you-govee-api-key)
   (see [Setup](#setup)), and/or one or more Govee lights with **LAN
@@ -125,6 +132,11 @@ LAN discovery works by sending a `scan` request to the multicast group
 Key dependencies (see `requirements.txt` for the full pinned list):
 `ultralytics`, `torch` / `torchvision`, `opencv-python`, `pydantic-settings`,
 `requests`.
+
+> **Note:** `requirements.txt` pins the standard (CPU) PyPI builds of
+> `torch`/`torchvision` so it installs anywhere. For CUDA inference on an
+> NVIDIA GPU, reinstall them from the PyTorch CUDA index afterwards, e.g.
+> `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`.
 
 > **Note:** the YOLO weights file (`yolo26n-pose.pt`) is git-ignored and
 > downloaded automatically by Ultralytics on first run.
@@ -201,9 +213,9 @@ other key to keep it.
 
 Once running, a video window shows the live feed with an overlay: the
 door-zone box, gesture-arming status, and current lights state. Walk through
-the doorway and the lights track room occupancy; raise both wrists for a
-second to arm the gesture toggle, then bring your wrists together twice
-within 2 seconds to clap the lights on/off directly. Press **`q`** in the
+the doorway and the lights track room occupancy; raise both wrists for
+0.3 s to arm the gesture toggle, then clap once to toggle the lights
+on/off directly. Press **`q`** in the
 video window to quit.
 
 ---
@@ -227,40 +239,69 @@ video window to quit.
 
 ## Testing (local dev only)
 
-`tests/` (unit tests for the occupancy state machine) and `serverTest.py`
-(a manual light on/off smoke-test script) exist for local development but
-are git-ignored and not part of the tracked repo, so they won't come along
-with a fresh clone. The occupancy unit tests mock out `cv2`/`torch`/
+`tests/` (unit tests for the occupancy state machine) is git-ignored and not
+part of the tracked repo, so it won't come along with a fresh clone.
+`serverTest.py` — a two-line manual smoke-test that turns the lights off via
+`server.py` — is tracked. The occupancy unit tests mock out `cv2`/`torch`/
 `ultralytics`/`server` to exercise `tracker.py`'s decision logic without a
 camera or real lights; they currently target an earlier version of the
 tracking logic and are not all passing against the current doorway-tracking
-implementation.
+implementation (6 of 11 fail as of this writing).
 
 ---
 
-## Roadmap
+## Version history & roadmap
 
-### Now — Doorway occupancy tracking, gesture toggle, cloud control ✅ *(current, V2)*
+### V1 — Frame presence, LAN only
 
-- Room occupancy is tracked by **doorway line crossings**, not raw
-  per-frame visibility, so occlusion no longer causes false turn-offs (see
+- Person enters the frame → lights **on**; person leaves the frame → lights
+  **off**. Plain YOLO person detection — no pose model.
+- No Govee cloud API support — lights were controlled purely over the Govee
+  LAN UDP API.
+- Failed constantly under occlusion: any brief disappearance read as "room
+  empty" and cut the lights (see
   [Reliability](#reliability-the-occlusion-problem)).
-- A **clap gesture**, gated by a held both-wrists-raised pose, toggles the
-  lights directly.
-- Lights are controlled via **Govee's cloud API**, falling back to the LAN
-  API automatically if the cloud is unreachable.
 
-### Next — Rounding out gesture control
+### V2 — Pose model + clap toggle
 
-- **Dimming**: wave arms down to dim the lights after they've turned on, not
-  just an on/off clap toggle.
-- **Mic + camera fusion**: cross-confirm the clap with audio so a stretch
-  isn't misread as a clap and an unrelated noise isn't misread as one either.
-- **Auto-doorway detection**: custom-train a model (see
-  `YOLODoorwayDetection.ipynb`, currently unused/experimental) to detect the
-  doorway automatically, removing the manual box-drawing step.
+- Implemented the YOLO **pose model**; a clap became the action that flips
+  the lights.
+- Extremely buggy: hands merely held together for long stretches (e.g.
+  being on your phone) counted as claps, so the lights flickered — which
+  made things much worse.
 
-### Depth sensing for low-light / darkness
+### V3 — Cloud control + activation gate ✅ *(current)*
+
+- **Govee cloud API** added, so YOLight can reach your lights from
+  anywhere; the LAN API remains as an automatic fallback.
+- An **activation pose** (both wrists raised, held **0.3 s**) gates the
+  clap toggle so false claps no longer flicker the lights. The timing was
+  tuned through trial and error — long enough to block accidental
+  activations, short enough to feel natural.
+- With the gate in place, the toggle switched from a double clap to a
+  **single clap** (with a 0.5 s cooldown).
+- Light commands run on background threads and fan out to every device in
+  parallel, so multiple lights toggle at the same time.
+- **Known problem:** it's currently very hard to re-toggle the lights
+  through the camera.
+
+### V4 — Frontend *(planned, two updates)*
+
+1. A **localhost React** app.
+2. TBD.
+
+This will also open up user customization — e.g. changing the activation
+hold time — with more settings to come.
+
+### V5 — Richer pose + light control *(planned)*
+
+- Control the **brightness** of the lights and change their **colours**
+  via poses.
+- Under consideration (may be too advanced): let users take pose/stance
+  photos of themselves pointing at a specific light, then bind actions to
+  that exact light.
+
+### Unscheduled — depth sensing for low-light / darkness
 
 Fix the biggest functional gap: a plain RGB camera is **blind in the dark**,
 so the one moment you most want automatic lighting — walking into a
@@ -274,11 +315,14 @@ light.
 - Uses `pyrealsense2` to pull aligned depth + color frames from the D435.
 - Not started yet — no `pyrealsense2` usage exists in the codebase today.
 
-### Smaller improvements (any time)
+### Unscheduled — smaller improvements
 
 - Configurable occlusion tolerance and camera index via `.env`
-- Color / brightness control (the LAN and cloud APIs both support more than
-  on/off)
+- **Mic + camera fusion**: cross-confirm the clap with audio so a stretch
+  isn't misread as a clap and an unrelated noise isn't misread as one either
+- **Auto-doorway detection**: custom-train a model (see
+  `YOLODoorwayDetection.ipynb`, currently unused/experimental) to detect the
+  doorway automatically, removing the manual box-drawing step
 - Multi-room support keyed by which devices to control
 - Headless / service mode
 - Bring the `tests/` suite up to date with the current doorway-tracking
@@ -286,4 +330,4 @@ light.
 
 ---
 
-*V2 — built with a YOLO pose model, OpenCV, and the Govee cloud + LAN APIs.*
+*V3 — built with a YOLO pose model, OpenCV, and the Govee cloud + LAN APIs.*
