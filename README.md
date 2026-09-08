@@ -283,7 +283,7 @@ implementation (6 of 11 fail as of this writing).
 - Light commands run on background threads and fan out to every device in
   parallel, so multiple lights toggle at the same time.
 - **Known problem:** it's currently very hard to re-toggle the lights
-  through the camera.
+  through the camera once the lights are turned off.
 
 ### V4 — Frontend *(planned, two updates)*
 
